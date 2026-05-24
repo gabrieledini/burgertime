@@ -121,6 +121,22 @@
   #hud .pepper { color: #6bcfff; }
   #hud .score { color: #ffd23f; }
 
+  .mute-btn {
+    pointer-events: auto;
+    cursor: pointer;
+    color: #6bcfff;
+    background: rgba(0,0,0,0.4);
+    border: 1px solid #6bcfff66;
+    width: 22px; height: 22px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 4px;
+    font-size: 14px;
+    text-shadow: 0 0 4px #6bcfff;
+    transition: all 0.1s;
+  }
+  .mute-btn:active { transform: scale(0.9); }
+  .mute-btn.muted { color: #ff3860; border-color: #ff386066; text-shadow: 0 0 4px #ff3860; }
+
   /* Controlli */
   .controls {
     height: 100%;
@@ -282,6 +298,7 @@
           <div class="score">SCORE <span id="score">000000</span></div>
           <div class="lives">LIVES <span id="lives">♥♥♥</span></div>
           <div class="pepper">PEPPER <span id="pepper">5</span></div>
+          <div id="mute-btn" class="mute-btn" title="Mute">♪</div>
         </div>
 
         <div id="title" class="overlay">
@@ -332,6 +349,264 @@ ctx.imageSmoothingEnabled = false;
 
 const W = canvas.width;   // 320
 const H = canvas.height;  // 240
+
+// ============================================================
+// AUDIO ENGINE (chiptune sintetico via Web Audio API)
+// ============================================================
+const Audio = (() => {
+  let ctx = null;
+  let masterGain = null;
+  let musicGain = null;
+  let sfxGain = null;
+  let muted = false;
+  let musicTimer = null;
+  let musicStep = 0;
+  let started = false;
+
+  // Frequenze note (A4 = 440)
+  const NOTES = {
+    'C3': 130.81, 'D3': 146.83, 'E3': 164.81, 'F3': 174.61, 'G3': 196.00, 'A3': 220.00, 'B3': 246.94,
+    'C4': 261.63, 'D4': 293.66, 'E4': 329.63, 'F4': 349.23, 'F#4': 369.99, 'G4': 392.00, 'G#4': 415.30, 'A4': 440.00, 'A#4': 466.16, 'B4': 493.88,
+    'C5': 523.25, 'C#5': 554.37, 'D5': 587.33, 'D#5': 622.25, 'E5': 659.25, 'F5': 698.46, 'G5': 783.99, 'A5': 880.00, 'B5': 987.77,
+    'C6': 1046.50,
+    'rest': 0,
+  };
+
+  // Burger Time main theme - melodia ispirata al brano arcade originale
+  // (un loop allegro in tonalità maggiore, 16esimi, con basso in walking)
+  // Ogni elemento = [nota, durata in sedicesimi]
+  const MELODY = [
+    // frase 1
+    ['C5',2],['E5',2],['G5',2],['C6',2],['G5',2],['E5',2],['C5',4],
+    ['D5',2],['F5',2],['A5',2],['F5',2],['D5',2],['B4',2],['G4',4],
+    // frase 2
+    ['C5',2],['E5',2],['G5',2],['C6',2],['B5',2],['A5',2],['G5',4],
+    ['F5',2],['E5',2],['D5',2],['E5',2],['F5',2],['D5',2],['C5',4],
+    // frase 3 (variazione)
+    ['E5',1],['rest',1],['E5',1],['rest',1],['E5',2],['G5',2],['C6',4],
+    ['B5',1],['rest',1],['B5',1],['rest',1],['A5',2],['G5',2],['E5',4],
+    // frase 4
+    ['F5',2],['A5',2],['G5',2],['E5',2],['D5',2],['F5',2],['E5',2],['D5',2],
+    ['C5',2],['E5',2],['D5',2],['B4',2],['C5',8],
+  ];
+
+  // Linea di basso (un'ottava sotto, pattern semplice)
+  const BASS = [
+    ['C3',4],['G3',4],['C3',4],['G3',4],
+    ['F3',4],['C3',4],['G3',4],['G3',4],
+    ['C3',4],['G3',4],['E3',4],['G3',4],
+    ['F3',4],['G3',4],['C3',4],['C3',4],
+    ['C3',4],['G3',4],['C3',4],['E3',4],
+    ['F3',4],['G3',4],['C3',4],['C3',4],
+    ['F3',4],['D3',4],['G3',4],['G3',4],
+    ['C3',4],['G3',4],['C3',4],['C3',4],
+  ];
+
+  // Tempo: 1 sedicesimo = 0.09s (~165 bpm sentito molto vivace)
+  const SIXTEENTH = 0.09;
+
+  function init() {
+    if (ctx) return;
+    try {
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+      masterGain = ctx.createGain();
+      masterGain.gain.value = 0.6;
+      masterGain.connect(ctx.destination);
+
+      musicGain = ctx.createGain();
+      musicGain.gain.value = 0.18;
+      musicGain.connect(masterGain);
+
+      sfxGain = ctx.createGain();
+      sfxGain.gain.value = 0.4;
+      sfxGain.connect(masterGain);
+    } catch(e) {
+      console.warn('Audio non disponibile:', e);
+    }
+  }
+
+  function resume() {
+    if (!ctx) init();
+    if (ctx && ctx.state === 'suspended') ctx.resume();
+  }
+
+  // Suona una nota su un canale con onda data
+  function playNote(freq, duration, when, type, gainNode, volume = 0.3) {
+    if (!ctx || freq === 0) return;
+    const osc = ctx.createOscillator();
+    const env = ctx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, when);
+
+    // envelope ADSR semplice tipo NES
+    env.gain.setValueAtTime(0, when);
+    env.gain.linearRampToValueAtTime(volume, when + 0.005);
+    env.gain.exponentialRampToValueAtTime(volume * 0.7, when + duration * 0.5);
+    env.gain.exponentialRampToValueAtTime(0.001, when + duration * 0.95);
+
+    osc.connect(env);
+    env.connect(gainNode);
+    osc.start(when);
+    osc.stop(when + duration);
+  }
+
+  // Schedula una battuta a partire da 'startTime'
+  function scheduleBar(startTime) {
+    if (!ctx) return 0;
+    let t = startTime;
+    let totalDur = 0;
+    // melodia (square pulse)
+    for (const [note, dur] of MELODY) {
+      const d = dur * SIXTEENTH;
+      playNote(NOTES[note] || 0, d * 0.95, t, 'square', musicGain, 0.22);
+      t += d;
+      totalDur += d;
+    }
+    // basso (triangolo-ish via sawtooth attenuato in ottava bassa)
+    let bt = startTime;
+    for (const [note, dur] of BASS) {
+      const d = dur * SIXTEENTH;
+      playNote(NOTES[note] || 0, d * 0.9, bt, 'triangle', musicGain, 0.35);
+      bt += d;
+    }
+    return totalDur;
+  }
+
+  function startMusic() {
+    if (!ctx) init();
+    if (!ctx || muted) return;
+    stopMusic();
+    started = true;
+    let nextTime = ctx.currentTime + 0.05;
+    const playBar = () => {
+      if (!started || muted) return;
+      const dur = scheduleBar(nextTime);
+      nextTime += dur;
+      // schedula la prossima leggermente prima della fine
+      musicTimer = setTimeout(playBar, (dur - 0.1) * 1000);
+    };
+    playBar();
+  }
+
+  function stopMusic() {
+    started = false;
+    if (musicTimer) { clearTimeout(musicTimer); musicTimer = null; }
+  }
+
+  // ---------- SFX ----------
+  function sfxStep() {
+    if (!ctx || muted) return;
+    const t = ctx.currentTime;
+    playNote(220, 0.04, t, 'square', sfxGain, 0.15);
+  }
+
+  function sfxStomp() {
+    if (!ctx || muted) return;
+    const t = ctx.currentTime;
+    playNote(440, 0.06, t, 'square', sfxGain, 0.3);
+    playNote(660, 0.08, t + 0.04, 'square', sfxGain, 0.25);
+  }
+
+  function sfxIngredientFall() {
+    if (!ctx || muted) return;
+    const t = ctx.currentTime;
+    // glissato discendente
+    const osc = ctx.createOscillator();
+    const env = ctx.createGain();
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(800, t);
+    osc.frequency.exponentialRampToValueAtTime(200, t + 0.3);
+    env.gain.setValueAtTime(0.3, t);
+    env.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
+    osc.connect(env); env.connect(sfxGain);
+    osc.start(t); osc.stop(t + 0.3);
+  }
+
+  function sfxLand() {
+    if (!ctx || muted) return;
+    const t = ctx.currentTime;
+    playNote(523, 0.08, t, 'square', sfxGain, 0.35);
+    playNote(784, 0.1, t + 0.05, 'square', sfxGain, 0.3);
+    playNote(1046, 0.12, t + 0.1, 'square', sfxGain, 0.25);
+  }
+
+  function sfxPepper() {
+    if (!ctx || muted) return;
+    const t = ctx.currentTime;
+    // burst di rumore (filtro su bufferSource random)
+    const buffer = ctx.createBuffer(1, ctx.sampleRate * 0.15, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < data.length; i++) {
+      data[i] = (Math.random() * 2 - 1) * (1 - i / data.length);
+    }
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.value = 2000;
+    const g = ctx.createGain();
+    g.gain.value = 0.4;
+    src.connect(filter); filter.connect(g); g.connect(sfxGain);
+    src.start(t);
+  }
+
+  function sfxStun() {
+    if (!ctx || muted) return;
+    const t = ctx.currentTime;
+    playNote(880, 0.05, t, 'square', sfxGain, 0.3);
+    playNote(660, 0.05, t + 0.05, 'square', sfxGain, 0.3);
+    playNote(440, 0.08, t + 0.1, 'square', sfxGain, 0.3);
+  }
+
+  function sfxDie() {
+    if (!ctx || muted) return;
+    stopMusic();
+    const t = ctx.currentTime;
+    // melodia di morte discendente
+    const notes = [['C5',0.12],['B4',0.12],['A4',0.12],['G4',0.12],['F4',0.12],['E4',0.12],['D4',0.12],['C4',0.3]];
+    let nt = t;
+    for (const [n, d] of notes) {
+      playNote(NOTES[n], d, nt, 'square', sfxGain, 0.35);
+      nt += d;
+    }
+  }
+
+  function sfxLevelClear() {
+    if (!ctx || muted) return;
+    stopMusic();
+    const t = ctx.currentTime;
+    const notes = [['C5',0.1],['E5',0.1],['G5',0.1],['C6',0.1],['G5',0.1],['C6',0.2],['E6',0.4]];
+    let nt = t;
+    for (const [n, d] of notes) {
+      const f = NOTES[n] || NOTES['C6'] * 2;
+      playNote(f, d * 0.9, nt, 'square', sfxGain, 0.35);
+      playNote(f / 2, d * 0.9, nt, 'triangle', sfxGain, 0.25);
+      nt += d;
+    }
+  }
+
+  function sfxStart() {
+    if (!ctx || muted) return;
+    const t = ctx.currentTime;
+    playNote(523, 0.08, t, 'square', sfxGain, 0.35);
+    playNote(659, 0.08, t + 0.08, 'square', sfxGain, 0.35);
+    playNote(784, 0.15, t + 0.16, 'square', sfxGain, 0.4);
+  }
+
+  function setMuted(m) {
+    muted = m;
+    if (m) stopMusic();
+    else if (started) startMusic();
+  }
+  function isMuted() { return muted; }
+
+  return {
+    init, resume, startMusic, stopMusic,
+    sfxStep, sfxStomp, sfxIngredientFall, sfxLand,
+    sfxPepper, sfxStun, sfxDie, sfxLevelClear, sfxStart,
+    setMuted, isMuted,
+  };
+})();
 
 // ---------- COLORI PALETTE ARCADE ----------
 const COL = {
@@ -534,6 +809,16 @@ document.getElementById('startBtn').addEventListener('click', startGame);
 document.getElementById('restartBtn').addEventListener('click', () => { resetAll(); startGame(); });
 document.getElementById('nextBtn').addEventListener('click', nextLevel);
 
+// Mute toggle
+const muteBtn = document.getElementById('mute-btn');
+muteBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const m = !Audio.isMuted();
+  Audio.setMuted(m);
+  muteBtn.textContent = m ? '✕' : '♪';
+  muteBtn.classList.toggle('muted', m);
+});
+
 function startGame() {
   document.getElementById('title').classList.add('hidden');
   document.getElementById('gameover').classList.add('hidden');
@@ -549,6 +834,11 @@ function startGame() {
   resetPlayer();
   state.scene = 'playing';
   updateHUD();
+  // Audio: inizializza dopo gesture utente e avvia musica
+  Audio.init();
+  Audio.resume();
+  Audio.sfxStart();
+  setTimeout(() => Audio.startMusic(), 500);
 }
 function nextLevel() {
   document.getElementById('levelclear').classList.add('hidden');
@@ -694,9 +984,11 @@ function updatePlayer() {
         if (seg >= 0 && seg < 4 && !ing.stepped[seg]) {
           ing.stepped[seg] = true;
           state.score += 50;
+          Audio.sfxStomp();
           if (ing.stepped.every(s => s)) {
             ing.falling = true; ing.vy = 0;
             state.score += 100;
+            Audio.sfxIngredientFall();
           }
           updateHUD();
         }
@@ -747,10 +1039,12 @@ function updateIngredients() {
           if (plate) {
             plate.stack.push(ing.type);
             state.score += 200;
+            Audio.sfxLand();
             updateHUD();
             // controlla completamento livello
             if (allBurgersDone(lvl)) {
               state.scene = 'clear';
+              Audio.sfxLevelClear();
               setTimeout(() => {
                 document.getElementById('bonus').textContent = 'Bonus: ' + (1000 * state.level);
                 state.score += 1000 * state.level;
@@ -909,16 +1203,20 @@ function updateEnemies() {
 function playerDies() {
   player.state = 'dying';
   state.flashTimer = 60;
+  Audio.sfxDie();
   setTimeout(() => {
     state.lives--;
     if (state.lives <= 0) {
       state.scene = 'gameover';
+      Audio.stopMusic();
       document.getElementById('finalScore').textContent = 'Score: ' + String(state.score).padStart(6,'0');
       document.getElementById('gameover').classList.remove('hidden');
     } else {
       resetPlayer();
       state.enemies = [];
       updateHUD();
+      // riprendi musica dopo morte
+      setTimeout(() => Audio.startMusic(), 300);
     }
   }, 1200);
 }
@@ -930,6 +1228,7 @@ function firePepper() {
   if (player.state === 'dying') return;
   state.pepper--;
   updateHUD();
+  Audio.sfxPepper();
   state.pepperShots.push({
     x: player.x + player.w/2 + player.dir * 8,
     y: player.y + 4,
@@ -952,6 +1251,7 @@ function updatePepper() {
           e.state = 'stunned';
           e.stunTimer = 90;
           state.score += 50;
+          Audio.sfxStun();
         }
       }
     }
@@ -1292,6 +1592,15 @@ requestAnimationFrame(loop);
 // Previeni zoom/scroll su mobile
 document.addEventListener('gesturestart', e => e.preventDefault());
 document.addEventListener('touchmove', e => e.preventDefault(), {passive:false});
+
+// Pausa audio quando la tab perde focus
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    Audio.stopMusic();
+  } else if (state.scene === 'playing' && !Audio.isMuted()) {
+    Audio.startMusic();
+  }
+});
 </script>
 
 </body>
