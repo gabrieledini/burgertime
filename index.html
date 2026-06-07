@@ -651,62 +651,52 @@ const ROWS = 15;
 // burgers:   { col }    -- una colonna che attraversa più piattaforme con ingredienti
 
 function makeLevel(idx) {
-  // Disegniamo un layout classico Burger Time con 4 hamburger.
-  // 4 colonne di ingredienti a x=2,7,12,17 (in tile)
-  // Piattaforme su 4 livelli + piatti in fondo.
+  // Layout con piattaforme CONTINUE (nessun buco orizzontale) e NUMEROSE SCALE.
+  // 4 piani pieni, 15 scale distribuite (alcune complete, alcune parziali).
+
   const platforms = [
-    // riga superiore
     { row: 3,  c1: 1, c2: 19 },
-    // riga 2
-    { row: 6,  c1: 1, c2: 9  },
-    { row: 6,  c1: 11, c2: 19 },
-    // riga 3
+    { row: 6,  c1: 1, c2: 19 },
     { row: 9,  c1: 1, c2: 19 },
-    // riga 4 (sopra i piatti)
-    { row: 12, c1: 1, c2: 6 },
-    { row: 12, c1: 8, c2: 13 },
-    { row: 12, c1: 15, c2: 19 },
+    { row: 12, c1: 1, c2: 19 },
   ];
 
   const ladders = [
-    // top -> r2
-    { col: 4,  r1: 3, r2: 6 },
-    { col: 9,  r1: 3, r2: 6 },   // discende ma c'è gap su row 6
-    { col: 14, r1: 3, r2: 6 },
-    // r2 -> r3
-    { col: 4,  r1: 6, r2: 9 },
-    { col: 7,  r1: 6, r2: 9 },
-    { col: 12, r1: 6, r2: 9 },
-    { col: 17, r1: 6, r2: 9 },
-    // r3 -> r4
-    { col: 3,  r1: 9, r2: 12 },
+    // Colonna 2 - scala completa lato sinistro
+    { col: 2, r1: 3, r2: 6 },
+    { col: 2, r1: 6, r2: 9 },
+    { col: 2, r1: 9, r2: 12 },
+    // Colonna 5 - sopra + sotto (gap in mezzo)
+    { col: 5, r1: 3, r2: 6 },
+    { col: 5, r1: 9, r2: 12 },
+    // Colonna 7 - solo piano centrale
+    { col: 7, r1: 6, r2: 9 },
+    // Colonna 10 - scala completa centro
+    { col: 10, r1: 3, r2: 6 },
+    { col: 10, r1: 6, r2: 9 },
     { col: 10, r1: 9, r2: 12 },
-    { col: 17, r1: 9, r2: 12 },
-    // r4 -> piatti (riga 14)
-    { col: 3,  r1: 12, r2: 14 },
-    { col: 10, r1: 12, r2: 14 },
-    { col: 17, r1: 12, r2: 14 },
+    // Colonna 12 - sopra + sotto
+    { col: 12, r1: 3, r2: 6 },
+    { col: 12, r1: 9, r2: 12 },
+    // Colonna 15 - solo piano centrale
+    { col: 15, r1: 6, r2: 9 },
+    // Colonna 18 - scala completa lato destro
+    { col: 18, r1: 3, r2: 6 },
+    { col: 18, r1: 6, r2: 9 },
+    { col: 18, r1: 9, r2: 12 },
   ];
 
-  // 4 hamburger su 4 colonne (col tile)
-  const burgerCols = [3, 10, 17];
-  // Allarghiamo a 4 colonne aggiungendo una a sinistra
-  burgerCols.unshift(-1); // placeholder, sostituiremo
-  burgerCols[0] = 6;
+  // 4 hamburger ben distanziati, lontani dalle colonne delle scale
+  const burgerCols = [3, 8, 13, 17];
 
-  // Per ogni colonna burger: 4 ingredienti uno sopra l'altro,
-  // alle righe dove c'è una piattaforma.
-  // Useremo le piattaforme che attraversano la colonna.
   const ingredients = [];
   const ingTypes = ['bunTop','lettuce','meat','bunBot'];
 
   burgerCols.forEach((c, ci) => {
-    // trova le piattaforme che attraversano c, ordinate per row
     const rows = platforms
       .filter(p => c >= p.c1 && c < p.c2)
       .map(p => p.row)
       .sort((a,b)=>a-b);
-    // assegna ingredienti dall'alto verso il basso
     rows.forEach((r, i) => {
       if (i < ingTypes.length) {
         ingredients.push({
@@ -714,8 +704,8 @@ function makeLevel(idx) {
           row: r,
           type: ingTypes[i],
           x: c * TILE,
-          y: r * TILE - 6,    // posizionato sopra la piattaforma
-          stepped: [false,false,false,false], // 4 segmenti
+          y: r * TILE - 6,
+          stepped: [false,false,false,false],
           falling: false,
           vy: 0,
           stackId: ci,
@@ -724,7 +714,7 @@ function makeLevel(idx) {
     });
   });
 
-  // Piatti in fondo (riga 14)
+  // Piatti in fondo (riga 14), uno per ogni colonna burger
   const plates = burgerCols.map(c => ({ col: c, row: 14, stack: [] }));
 
   return {
